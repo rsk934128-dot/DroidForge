@@ -13,7 +13,7 @@ enum class WorkflowTriggerMode(val labelEn: String, val labelBn: String) {
 
 data class WorkflowConfig(
   val task: GradleBuildTask = GradleBuildTask.ASSEMBLE_DEBUG,
-  val jdkVersion: String = "17",
+  val jdkVersion: String = "21",
   val branch: String = "main",
   val triggerMode: WorkflowTriggerMode = WorkflowTriggerMode.MANUAL_AND_PUSH,
   val publishRelease: Boolean = true,
