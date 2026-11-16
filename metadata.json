@@ -1,0 +1,6 @@
+{
+  "name": "DroidForge",
+  "description": "Mobile GitHub Actions CI/CD console to inspect repositories, configure Android APK build workflows, trigger builds, monitor job steps, and download APK releases.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

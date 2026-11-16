@@ -1,0 +1,127 @@
+name: Build & Release Android APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build variant (auto uses release if keystore secrets exist, else debug)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - release
+          - debug
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build Android APK & Publish Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Prepare debug keystore
+        run: |
+          if [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          elif [ ! -f debug.keystore ]; then
+            keytool -genkey -v -keystore debug.keystore -storepass android \
+              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
+              -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Run unit and Robolectric tests
+        run: |
+          if [ -x ./gradlew ]; then
+            ./gradlew :app:testDebugUnitTest
+          else
+            gradle :app:testDebugUnitTest
+          fi
+
+      - name: Determine build mode & prepare release keystore
+        id: build_mode
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          REQUESTED="${{ inputs.build_type || 'auto' }}"
+          if [ "$REQUESTED" = "release" ] || { [ "$REQUESTED" = "auto" ] && [ -n "$KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ]; }; then
+            if [ -z "$KEYSTORE_BASE64" ] || [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_PASSWORD" ]; then
+              echo "ERROR: KEYSTORE_BASE64, STORE_PASSWORD, and KEY_PASSWORD secrets are required for release builds."
+              exit 1
+            fi
+            echo "$KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
+            echo "variant=release" >> "$GITHUB_OUTPUT"
+            echo "task=assembleRelease" >> "$GITHUB_OUTPUT"
+          else
+            echo "variant=debug" >> "$GITHUB_OUTPUT"
+            echo "task=assembleDebug" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Android APK
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -x ./gradlew ]; then
+            ./gradlew ${{ steps.build_mode.outputs.task }}
+          else
+            gradle ${{ steps.build_mode.outputs.task }}
+          fi
+
+      - name: Prepare APK for release
+        id: apk_file
+        run: |
+          VARIANT="${{ steps.build_mode.outputs.variant }}"
+          APK_SRC=$(find app/build/outputs/apk/"$VARIANT" -name "*.apk" | head -n 1)
+          if [ -z "$APK_SRC" ]; then
+            echo "No APK found in app/build/outputs/apk/$VARIANT"
+            exit 1
+          fi
+          mkdir -p release-artifacts
+          TAG_LABEL="${GITHUB_REF_NAME}"
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            TAG_LABEL="v1.0.${GITHUB_RUN_NUMBER}"
+          fi
+          APK_OUT="release-artifacts/DroidForge-${TAG_LABEL}-${VARIANT}.apk"
+          cp "$APK_SRC" "$APK_OUT"
+          echo "apk_path=$APK_OUT" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TAG_LABEL" >> "$GITHUB_OUTPUT"
+          echo "release_name=DroidForge ${TAG_LABEL} (${VARIANT})" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DroidForge-${{ steps.build_mode.outputs.variant }}-apk
+          path: ${{ steps.apk_file.outputs.apk_path }}
+
+      - name: Publish GitHub Release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.apk_file.outputs.tag_name }}
+          name: ${{ steps.apk_file.outputs.release_name }}
+          files: ${{ steps.apk_file.outputs.apk_path }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
