@@ -2,12 +2,17 @@ package com.example
 
 import android.content.Context
 import android.net.Uri
+import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.auth.GitHubOAuthManager
+import com.example.data.local.AppDatabase
+import com.example.data.local.EditorDraftEntity
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -56,5 +61,45 @@ class ExampleRobolectricTest {
     assertTrue(manager.isOAuthCallbackUri(forgedUri))
     val result = manager.exchangeCallbackForToken(forgedUri)
     assertFalse(result.isSuccess)
+  }
+
+  @Test
+  fun `room editorDraftDao upserts observes and deletes offline drafts`() = runTest {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java).allowMainThreadQueries().build()
+    try {
+      val dao = db.editorDraftDao()
+      val draft =
+        EditorDraftEntity(
+          draftKey = "rsk934128-dot/DroidForge::main::app/Main.kt",
+          repoFullName = "rsk934128-dot/DroidForge",
+          baseBranch = "main",
+          filePath = "app/Main.kt",
+          targetLineNumber = 18,
+          errorText = "Unresolved reference: foo",
+          originalContent = "val x = foo()",
+          editedContent = "val x = bar()",
+          newBranchName = "droidforge/fix-main-l18",
+          commitMessage = "fix: resolve foo reference",
+          prTitle = "fix: resolve foo in Main.kt",
+          prBody = "Auto-saved draft test",
+          updatedAt = 123456L,
+        )
+      dao.upsert(draft)
+
+      val fetched = dao.getDraft(draft.draftKey)
+      assertNotNull(fetched)
+      assertEquals("val x = bar()", fetched?.editedContent)
+
+      val list = dao.observeAllDrafts().first()
+      assertEquals(1, list.size)
+      assertEquals("app/Main.kt", list.first().filePath)
+
+      dao.deleteDraft(draft.draftKey)
+      assertNull(dao.getDraft(draft.draftKey))
+      assertTrue(dao.observeAllDrafts().first().isEmpty())
+    } finally {
+      db.close()
+    }
   }
 }

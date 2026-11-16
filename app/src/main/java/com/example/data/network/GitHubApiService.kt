@@ -146,4 +146,33 @@ interface GitHubApiService {
     @Path(value = "path", encoded = true) path: String,
     @Body body: GitHubPutFileRequest,
   ): Response<Unit>
+
+  @GET("repos/{owner}/{repo}/git/ref/heads/{branch}")
+  suspend fun getBranchRef(
+    @Path("owner") owner: String,
+    @Path("repo") repo: String,
+    @Path(value = "branch", encoded = true) branch: String,
+  ): Response<GitHubRefResponse>
+
+  @POST("repos/{owner}/{repo}/git/refs")
+  suspend fun createRef(
+    @Path("owner") owner: String,
+    @Path("repo") repo: String,
+    @Body body: GitHubCreateRefRequest,
+  ): Response<GitHubRefResponse>
+
+  @GET("repos/{owner}/{repo}/pulls")
+  suspend fun getPullRequests(
+    @Path("owner") owner: String,
+    @Path("repo") repo: String,
+    @Query("state") state: String = "open",
+    @Query("per_page") perPage: Int = 20,
+  ): Response<List<GitHubPullRequestResponse>>
+
+  @POST("repos/{owner}/{repo}/pulls")
+  suspend fun createPullRequest(
+    @Path("owner") owner: String,
+    @Path("repo") repo: String,
+    @Body body: GitHubCreatePrRequest,
+  ): Response<GitHubPullRequestResponse>
 }

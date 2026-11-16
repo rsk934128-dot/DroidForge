@@ -38,6 +38,23 @@ data class CachedWorkflowRunEntity(
   val updatedAt: String,
 )
 
+@Entity(tableName = "editor_drafts")
+data class EditorDraftEntity(
+  @PrimaryKey val draftKey: String,
+  val repoFullName: String,
+  val baseBranch: String,
+  val filePath: String,
+  val targetLineNumber: Int,
+  val errorText: String,
+  val originalContent: String,
+  val editedContent: String,
+  val newBranchName: String,
+  val commitMessage: String,
+  val prTitle: String,
+  val prBody: String,
+  val updatedAt: Long = System.currentTimeMillis(),
+)
+
 @Dao
 interface BookmarkedRepoDao {
   @Query("SELECT * FROM bookmarked_repos ORDER BY savedAt DESC")
@@ -63,4 +80,19 @@ interface CachedWorkflowRunDao {
 
   @Query("DELETE FROM cached_workflow_runs WHERE repoFullName = :repoFullName")
   suspend fun clearForRepo(repoFullName: String)
+}
+
+@Dao
+interface EditorDraftDao {
+  @Query("SELECT * FROM editor_drafts ORDER BY updatedAt DESC")
+  fun observeAllDrafts(): Flow<List<EditorDraftEntity>>
+
+  @Query("SELECT * FROM editor_drafts WHERE draftKey = :draftKey LIMIT 1")
+  suspend fun getDraft(draftKey: String): EditorDraftEntity?
+
+  @Insert(onConflict = OnConflictStrategy.REPLACE)
+  suspend fun upsert(draft: EditorDraftEntity)
+
+  @Query("DELETE FROM editor_drafts WHERE draftKey = :draftKey")
+  suspend fun deleteDraft(draftKey: String)
 }

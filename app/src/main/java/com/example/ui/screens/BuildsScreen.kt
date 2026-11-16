@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.CallSplit
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.Android
@@ -383,6 +384,61 @@ fun BuildsScreen(
                 }
               }
             }
+          }
+        }
+      }
+    }
+
+    if (pipelineState.openPullRequests.isNotEmpty()) {
+      item {
+        Text(
+          text = "${strings.openPrsTitle} (${pipelineState.openPullRequests.size})",
+          style = MaterialTheme.typography.titleMedium,
+        )
+      }
+      items(pipelineState.openPullRequests, key = { it.id }) { pr ->
+        Card(
+          shape = RoundedCornerShape(16.dp),
+          colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+          modifier =
+            Modifier.fillMaxWidth()
+              .clip(RoundedCornerShape(16.dp))
+              .clickable { BrowserHelper.openUrl(context, pr.htmlUrl) }
+              .testTag("open_pr_card_${pr.number}"),
+        ) {
+          Row(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+          ) {
+            Icon(
+              imageVector = Icons.AutoMirrored.Rounded.CallSplit,
+              contentDescription = null,
+              tint = MaterialTheme.colorScheme.primary,
+              modifier = Modifier.size(20.dp),
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+              Text(
+                text = "#${pr.number} · ${pr.title}",
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+              )
+              Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                val headRef = pr.head?.ref?.takeIf { it.isNotBlank() } ?: "patch"
+                val baseRef = pr.base?.ref?.takeIf { it.isNotBlank() } ?: "main"
+                MonoBadge(text = "$headRef -> $baseRef")
+                if (pr.draft) {
+                  MonoBadge(text = strings.draftPrBadge)
+                }
+              }
+            }
+            Icon(
+              imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+              contentDescription = strings.openPrOnGitHub,
+              tint = MaterialTheme.colorScheme.onSurfaceVariant,
+              modifier = Modifier.size(18.dp),
+            )
           }
         }
       }

@@ -173,6 +173,9 @@ data class GitHubFileContentResponse(
   val name: String = "",
   val path: String = "",
   val sha: String = "",
+  val size: Long = 0L,
+  val encoding: String? = null,
+  val content: String? = null,
   @Json(name = "html_url") val htmlUrl: String = "",
 )
 
@@ -182,4 +185,65 @@ data class GitHubPutFileRequest(
   val content: String,
   val sha: String? = null,
   val branch: String? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class GitHubRefObjectDto(
+  val sha: String = "",
+  val type: String = "",
+)
+
+@JsonClass(generateAdapter = true)
+data class GitHubRefResponse(
+  val ref: String = "",
+  @Json(name = "object") val obj: GitHubRefObjectDto = GitHubRefObjectDto(),
+)
+
+@JsonClass(generateAdapter = true)
+data class GitHubCreateRefRequest(
+  val ref: String,
+  val sha: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class GitHubCreatePrRequest(
+  val title: String,
+  val head: String,
+  val base: String,
+  val body: String,
+)
+
+@JsonClass(generateAdapter = true)
+data class GitHubPrBranchRefDto(
+  val ref: String = "",
+  val sha: String = "",
+)
+
+@JsonClass(generateAdapter = true)
+data class GitHubPullRequestResponse(
+  val id: Long = 0L,
+  val number: Int = 0,
+  val title: String = "",
+  @Json(name = "html_url") val htmlUrl: String = "",
+  val state: String = "",
+  val draft: Boolean = false,
+  val user: GitHubOwnerDto? = null,
+  val head: GitHubPrBranchRefDto? = null,
+  val base: GitHubPrBranchRefDto? = null,
+  @Json(name = "updated_at") val updatedAt: String = "",
+)
+
+data class GitHubRepoFile(
+  val path: String,
+  val content: String,
+  val sha: String,
+  val branch: String,
+  val htmlUrl: String,
+)
+
+data class PullRequestOutcome(
+  val branchName: String,
+  val prNumber: Int,
+  val prUrl: String,
+  val commitMessage: String,
 )

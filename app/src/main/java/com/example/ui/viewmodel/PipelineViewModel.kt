@@ -1,16 +1,25 @@
 package com.example.ui.viewmodel
 
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.data.ai.AIErrorService
+import com.example.data.ai.AiDiagnosisUiState
 import com.example.data.network.GitHubArtifactDto
 import com.example.data.network.GitHubBranchDto
 import com.example.data.network.GitHubJobDto
+import com.example.data.network.GitHubPullRequestResponse
 import com.example.data.network.GitHubReleaseDto
 import com.example.data.network.GitHubWorkflowDto
 import com.example.data.network.GitHubWorkflowRunDto
 import com.example.data.repository.GitHubRepository
+import com.example.domain.JobLogParser
+import com.example.domain.JobLogReport
+import com.example.domain.ParsedLogLine
+import com.example.ui.i18n.AppLanguage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -30,6 +39,7 @@ data class PipelineUiState(
   val branches: List<GitHubBranchDto> = emptyList(),
   val runs: List<GitHubWorkflowRunDto> = emptyList(),
   val releases: List<GitHubReleaseDto> = emptyList(),
+  val openPullRequests: List<GitHubPullRequestResponse> = emptyList(),
   val errorMessage: String? = null,
 )
 
@@ -40,9 +50,17 @@ data class RunDetailUiState(
   val jobs: List<GitHubJobDto> = emptyList(),
   val artifacts: List<GitHubArtifactDto> = emptyList(),
   val errorMessage: String? = null,
+  val selectedLogJobId: Long? = null,
+  val isLoadingLogs: Boolean = false,
+  val jobLogReport: JobLogReport? = null,
+  val logErrorMessage: String? = null,
+  val aiDiagnosisState: AiDiagnosisUiState = AiDiagnosisUiState.Idle,
 )
 
-class PipelineViewModel(private val repo: GitHubRepository) : ViewModel() {
+class PipelineViewModel(
+  private val repo: GitHubRepository,
+  private val aiErrorService: AIErrorService = AIErrorService(),
+) : ViewModel() {
 
   private val _pipelineState = MutableStateFlow(PipelineUiState())
   val pipelineState: StateFlow<PipelineUiState> = _pipelineState.asStateFlow()
@@ -72,6 +90,7 @@ class PipelineViewModel(private val repo: GitHubRepository) : ViewModel() {
       val branchesRes = repo.fetchBranches(owner, name)
       val runsRes = repo.fetchWorkflowRuns(owner, name)
       val releasesRes = repo.fetchReleases(owner, name)
+      val openPrsRes = repo.fetchOpenPullRequests(owner, name)
 
       val error =
         runsRes.exceptionOrNull()?.message
@@ -85,6 +104,7 @@ class PipelineViewModel(private val repo: GitHubRepository) : ViewModel() {
           branches = branchesRes.getOrElse { emptyList() },
           runs = runs,
           releases = releasesRes.getOrElse { emptyList() },
+          openPullRequests = openPrsRes.getOrElse { emptyList() },
           errorMessage = error,
         )
       }
@@ -112,6 +132,12 @@ class PipelineViewModel(private val repo: GitHubRepository) : ViewModel() {
           if (activeDetailRunId != null) {
             runs.firstOrNull { it.id == activeDetailRunId }?.let { updatedRun ->
               inspectRun(repoFullName, updatedRun, showSpinner = false)
+            }
+            val openLogJobId = _runDetailState.value.selectedLogJobId
+            if (openLogJobId != null) {
+              val jobName =
+                _runDetailState.value.jobs.firstOrNull { it.id == openLogJobId }?.name ?: "Job"
+              loadJobLogs(repoFullName, openLogJobId, jobName, showSpinner = false)
             }
           }
           if (runs.none { it.status == "queued" || it.status == "in_progress" }) {
@@ -220,6 +246,110 @@ class PipelineViewModel(private val repo: GitHubRepository) : ViewModel() {
     }
   }
 
+  fun loadJobLogs(
+    repoFullName: String,
+    jobId: Long,
+    jobName: String,
+    showSpinner: Boolean = true,
+  ) {
+    val parts = repoFullName.split('/')
+    if (parts.size != 2) return
+    _runDetailState.update {
+      it.copy(
+        selectedLogJobId = jobId,
+        isLoadingLogs = showSpinner,
+        logErrorMessage = null,
+      )
+    }
+    viewModelScope.launch {
+      repo
+        .fetchJobLogs(parts[0], parts[1], jobId, jobName)
+        .onSuccess { report ->
+          _runDetailState.update {
+            it.copy(
+              isLoadingLogs = false,
+              jobLogReport = report,
+              logErrorMessage = null,
+            )
+          }
+        }
+        .onFailure { err ->
+          _runDetailState.update {
+            it.copy(
+              isLoadingLogs = false,
+              logErrorMessage = err.message ?: "Unable to fetch job logs.",
+            )
+          }
+        }
+    }
+  }
+
+  fun closeJobLogs() {
+    _runDetailState.update {
+      it.copy(
+        selectedLogJobId = null,
+        isLoadingLogs = false,
+        jobLogReport = null,
+        logErrorMessage = null,
+        aiDiagnosisState = AiDiagnosisUiState.Idle,
+      )
+    }
+  }
+
+  fun explainBuildError(
+    jobName: String,
+    report: JobLogReport,
+    language: AppLanguage,
+    focusLine: ParsedLogLine? = null,
+  ) {
+    val sanitizedContext = JobLogParser.buildSanitizedErrorContext(report, focusLine)
+    if (sanitizedContext.isBlank()) {
+      _runDetailState.update {
+        it.copy(
+          aiDiagnosisState =
+            AiDiagnosisUiState.Error("No log lines available for AI analysis.", focusLine?.lineNumber)
+        )
+      }
+      return
+    }
+
+    _runDetailState.update {
+      it.copy(aiDiagnosisState = AiDiagnosisUiState.Loading(focusLine?.lineNumber))
+    }
+
+    viewModelScope.launch {
+      try {
+        val diagnosis =
+          aiErrorService.analyzeBuildError(
+            jobName = jobName,
+            sanitizedLogContext = sanitizedContext,
+            language = language,
+            focusLineNumber = focusLine?.lineNumber,
+          )
+        _runDetailState.update {
+          it.copy(aiDiagnosisState = AiDiagnosisUiState.Success(diagnosis))
+        }
+      } catch (e: CancellationException) {
+        throw e
+      } catch (e: Exception) {
+        Log.e("PipelineViewModel", "AI error explanation failed", e)
+        _runDetailState.update {
+          it.copy(
+            aiDiagnosisState =
+              AiDiagnosisUiState.Error(
+                message = e.localizedMessage ?: "Failed to analyze build error.",
+                focusLineNumber = focusLine?.lineNumber,
+              )
+          )
+        }
+      }
+    }
+  }
+
+  fun clearAiDiagnosis() {
+    _runDetailState.update { it.copy(aiDiagnosisState = AiDiagnosisUiState.Idle) }
+  }
+
   fun clearRunDetail() {
     _runDetailState.value = RunDetailUiState()
   }
@@ -229,8 +359,12 @@ class PipelineViewModel(private val repo: GitHubRepository) : ViewModel() {
     pollingJob?.cancel()
   }
 
-  class Factory(private val repo: GitHubRepository) : ViewModelProvider.Factory {
+  class Factory(
+    private val repo: GitHubRepository,
+    private val aiErrorService: AIErrorService = AIErrorService(),
+  ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
-    override fun <T : ViewModel> create(modelClass: Class<T>): T = PipelineViewModel(repo) as T
+    override fun <T : ViewModel> create(modelClass: Class<T>): T =
+      PipelineViewModel(repo, aiErrorService) as T
   }
 }

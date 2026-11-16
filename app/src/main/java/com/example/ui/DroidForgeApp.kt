@@ -59,11 +59,13 @@ import com.example.ui.components.BrowserHelper
 import com.example.ui.i18n.AppLanguage
 import com.example.ui.i18n.stringsFor
 import com.example.ui.screens.BuildsScreen
+import com.example.ui.screens.EditorScreen
 import com.example.ui.screens.GeneratorScreen
 import com.example.ui.screens.ReposScreen
 import com.example.ui.screens.RunDetailScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.theme.DroidForgeTheme
+import com.example.ui.viewmodel.EditorViewModel
 import com.example.ui.viewmodel.MainViewModel
 import com.example.ui.viewmodel.PipelineViewModel
 import kotlinx.coroutines.flow.merge
@@ -71,6 +73,7 @@ import kotlinx.coroutines.flow.merge
 const val ROUTE_REPOS = "repos"
 const val ROUTE_BUILDS = "builds"
 const val ROUTE_RUN_DETAIL = "run_detail"
+const val ROUTE_EDITOR = "editor"
 const val ROUTE_YAML = "yaml"
 const val ROUTE_SETTINGS = "settings"
 
@@ -86,9 +89,11 @@ private data class NavDestination(
 fun DroidForgeApp(
   mainViewModel: MainViewModel,
   pipelineViewModel: PipelineViewModel,
+  editorViewModel: EditorViewModel,
 ) {
   val prefs by mainViewModel.prefs.collectAsStateWithLifecycle()
   val bookmarkedRepos by mainViewModel.bookmarkedRepos.collectAsStateWithLifecycle()
+  val savedDrafts by mainViewModel.savedDrafts.collectAsStateWithLifecycle()
   val exploreState by mainViewModel.exploreState.collectAsStateWithLifecycle()
   val searchQuery by mainViewModel.searchQuery.collectAsStateWithLifecycle()
   val settingsState by mainViewModel.settingsState.collectAsStateWithLifecycle()
@@ -96,6 +101,7 @@ fun DroidForgeApp(
   val vercelState by mainViewModel.vercelState.collectAsStateWithLifecycle()
   val pipelineState by pipelineViewModel.pipelineState.collectAsStateWithLifecycle()
   val runDetailState by pipelineViewModel.runDetailState.collectAsStateWithLifecycle()
+  val editorState by editorViewModel.uiState.collectAsStateWithLifecycle()
 
   val strings = remember(prefs.language) { stringsFor(prefs.language) }
   val context = LocalContext.current
@@ -137,7 +143,7 @@ fun DroidForgeApp(
   DroidForgeTheme(themeMode = prefs.themeMode) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
       val useNavRail = maxWidth >= 600.dp
-      val showChrome = currentRoute != ROUTE_RUN_DETAIL
+      val showChrome = currentRoute != ROUTE_RUN_DETAIL && currentRoute != ROUTE_EDITOR
 
       Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
@@ -250,7 +256,10 @@ fun DroidForgeApp(
                   searchQuery = searchQuery,
                   exploreState = exploreState,
                   bookmarkedRepos = bookmarkedRepos,
+                  savedDrafts = savedDrafts,
                   activeRepoFullName = prefs.activeRepoFullName,
+                  latestRun = pipelineState.runs.firstOrNull(),
+                  openPrCount = pipelineState.openPullRequests.size,
                   rateLimit = settingsState.rateLimit,
                   hasPat = prefs.githubPat.isNotBlank(),
                   onQueryChange = mainViewModel::onSearchQueryChange,
@@ -280,6 +289,14 @@ fun DroidForgeApp(
                     mainViewModel.selectActiveRepoByName(saved.fullName, saved.defaultBranch)
                     pipelineViewModel.loadPipeline(saved.fullName)
                     switchTab(ROUTE_BUILDS)
+                  },
+                  onOpenBuildsTab = { switchTab(ROUTE_BUILDS) },
+                  onResumeDraft = { draft ->
+                    editorViewModel.resumeSavedDraft(draft)
+                    navController.navigate(ROUTE_EDITOR)
+                  },
+                  onDeleteDraft = { draftKey ->
+                    mainViewModel.deleteDraft(draftKey, strings.draftDeleted)
                   },
                 )
               }
@@ -330,6 +347,57 @@ fun DroidForgeApp(
                   onRerun = pipelineViewModel::rerunCurrentRun,
                   onCancel = pipelineViewModel::cancelCurrentRun,
                   onDownloadArtifact = pipelineViewModel::downloadToUri,
+                  onLoadJobLogs = { jobId, jobName ->
+                    pipelineViewModel.loadJobLogs(pipelineState.repoFullName, jobId, jobName)
+                  },
+                  onCloseJobLogs = pipelineViewModel::closeJobLogs,
+                  onExplainError = { jobName, report, focusLine ->
+                    pipelineViewModel.explainBuildError(
+                      jobName = jobName,
+                      report = report,
+                      language = prefs.language,
+                      focusLine = focusLine,
+                    )
+                  },
+                  onDismissAiDiagnosis = pipelineViewModel::clearAiDiagnosis,
+                  onOpenFileInEditor = { filePath, lineNumber, errorLineText, aiPatchHint ->
+                    val repoDefaultBranch =
+                      bookmarkedRepos
+                        .firstOrNull { it.fullName == pipelineState.repoFullName }
+                        ?.defaultBranch
+                        ?: pipelineState.branches.firstOrNull()?.name
+                        ?: "main"
+                    val branch =
+                      runDetailState.run?.headBranch?.takeIf { it.isNotBlank() }
+                        ?: repoDefaultBranch
+                    editorViewModel.openFile(
+                      repoFullName = pipelineState.repoFullName,
+                      baseBranch = branch,
+                      filePath = filePath,
+                      targetLineNumber = lineNumber,
+                      errorText = errorLineText,
+                      aiPatchHint = aiPatchHint,
+                    )
+                    navController.navigate(ROUTE_EDITOR)
+                  },
+                )
+              }
+
+              composable(ROUTE_EDITOR) {
+                EditorScreen(
+                  strings = strings,
+                  state = editorState,
+                  hasPat = prefs.githubPat.isNotBlank(),
+                  onBack = { navController.popBackStack() },
+                  onRetryLoad = editorViewModel::retryLoadFile,
+                  onEditContent = editorViewModel::updateEditedContent,
+                  onResetEdits = editorViewModel::resetChanges,
+                  onGenerateAiPatch = { editorViewModel.generateAiFilePatch(prefs.language) },
+                  onNewBranchChange = editorViewModel::updateNewBranchName,
+                  onCommitMessageChange = editorViewModel::updateCommitMessage,
+                  onPrTitleChange = editorViewModel::updatePrTitle,
+                  onPrBodyChange = editorViewModel::updatePrBody,
+                  onCreatePr = editorViewModel::createPullRequest,
                 )
               }
 

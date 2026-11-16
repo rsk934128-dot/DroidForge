@@ -24,13 +24,16 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
+import androidx.compose.material.icons.automirrored.rounded.CallSplit
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.FolderOff
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.RocketLaunch
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Star
@@ -71,9 +74,12 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.R
 import com.example.data.local.BookmarkedRepoEntity
+import com.example.data.local.EditorDraftEntity
 import com.example.data.network.GitHubRepoDto
+import com.example.data.network.GitHubWorkflowRunDto
 import com.example.data.network.RateLimitCoreDto
 import com.example.ui.components.MonoBadge
+import com.example.ui.components.RunStatusPill
 import com.example.ui.i18n.AppStrings
 import com.example.ui.viewmodel.ExploreReposState
 
@@ -83,7 +89,10 @@ fun ReposScreen(
   searchQuery: String,
   exploreState: ExploreReposState,
   bookmarkedRepos: List<BookmarkedRepoEntity>,
+  savedDrafts: List<EditorDraftEntity>,
   activeRepoFullName: String,
+  latestRun: GitHubWorkflowRunDto?,
+  openPrCount: Int,
   rateLimit: RateLimitCoreDto?,
   hasPat: Boolean,
   onQueryChange: (String) -> Unit,
@@ -94,9 +103,12 @@ fun ReposScreen(
   onRemoveBookmark: (String) -> Unit,
   onSelectRepoForPipeline: (GitHubRepoDto) -> Unit,
   onSelectSavedRepoForPipeline: (BookmarkedRepoEntity) -> Unit,
+  onOpenBuildsTab: () -> Unit,
+  onResumeDraft: (EditorDraftEntity) -> Unit,
+  onDeleteDraft: (String) -> Unit,
   modifier: Modifier = Modifier,
 ) {
-  var selectedSegment by rememberSaveable { mutableIntStateOf(1) } // 0 = Saved, 1 = Explore
+  var selectedSegment by rememberSaveable { mutableIntStateOf(1) } // 0 = Saved, 1 = Explore, 2 = Drafts
   val keyboardController = LocalSoftwareKeyboardController.current
   val bookmarkedNames = bookmarkedRepos.map { it.fullName }.toSet()
 
@@ -107,6 +119,20 @@ fun ReposScreen(
   ) {
     item {
       HeroPipelineBanner(strings = strings, rateLimit = rateLimit)
+    }
+
+    if (activeRepoFullName.isNotBlank() || savedDrafts.isNotEmpty()) {
+      item {
+        ActivityOverviewCard(
+          strings = strings,
+          activeRepoFullName = activeRepoFullName,
+          latestRun = latestRun,
+          openPrCount = openPrCount,
+          draftCount = savedDrafts.size,
+          onOpenBuilds = onOpenBuildsTab,
+          onOpenDrafts = { selectedSegment = 2 },
+        )
+      }
     }
 
     item {
@@ -198,18 +224,38 @@ fun ReposScreen(
         SegmentedButton(
           selected = selectedSegment == 0,
           onClick = { selectedSegment = 0 },
-          shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+          shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
           modifier = Modifier.testTag("segment_saved_repos"),
         ) {
-          Text("${strings.tabSavedRepos} (${bookmarkedRepos.size})")
+          Text(
+            text = "${strings.tabSavedRepos} (${bookmarkedRepos.size})",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
         }
         SegmentedButton(
           selected = selectedSegment == 1,
           onClick = { selectedSegment = 1 },
-          shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+          shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
           modifier = Modifier.testTag("segment_explore_repos"),
         ) {
-          Text(strings.tabExploreRepos)
+          Text(
+            text = strings.tabExploreRepos,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+        SegmentedButton(
+          selected = selectedSegment == 2,
+          onClick = { selectedSegment = 2 },
+          shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
+          modifier = Modifier.testTag("segment_drafts"),
+        ) {
+          Text(
+            text = "${strings.tabDrafts} (${savedDrafts.size})",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
         }
       }
     }
@@ -230,6 +276,24 @@ fun ReposScreen(
             strings = strings,
             onOpenPipeline = { onSelectSavedRepoForPipeline(saved) },
             onRemove = { onRemoveBookmark(saved.fullName) },
+          )
+        }
+      }
+    } else if (selectedSegment == 2) {
+      if (savedDrafts.isEmpty()) {
+        item {
+          EmptyReposCard(
+            title = strings.emptyDraftsTitle,
+            body = strings.emptyDraftsBody,
+          )
+        }
+      } else {
+        items(savedDrafts, key = { it.draftKey }) { draft ->
+          SavedDraftCard(
+            draft = draft,
+            strings = strings,
+            onResume = { onResumeDraft(draft) },
+            onDelete = { onDeleteDraft(draft.draftKey) },
           )
         }
       }
@@ -614,6 +678,254 @@ private fun EmptyReposCard(title: String, body: String) {
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
+    }
+  }
+}
+
+@Composable
+private fun ActivityOverviewCard(
+  strings: AppStrings,
+  activeRepoFullName: String,
+  latestRun: GitHubWorkflowRunDto?,
+  openPrCount: Int,
+  draftCount: Int,
+  onOpenBuilds: () -> Unit,
+  onOpenDrafts: () -> Unit,
+) {
+  Card(
+    shape = RoundedCornerShape(18.dp),
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    modifier = Modifier.fillMaxWidth().testTag("activity_overview_card"),
+  ) {
+    Column(
+      modifier = Modifier.fillMaxWidth().padding(14.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Text(
+          text = strings.recentActivityTitle,
+          style = MaterialTheme.typography.titleSmall,
+        )
+        if (activeRepoFullName.isNotBlank()) {
+          MonoBadge(text = activeRepoFullName.substringAfter('/'))
+        }
+      }
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        Surface(
+          shape = RoundedCornerShape(12.dp),
+          color = MaterialTheme.colorScheme.surfaceContainer,
+          modifier =
+            Modifier.weight(1f)
+              .clip(RoundedCornerShape(12.dp))
+              .clickable(onClick = onOpenBuilds)
+              .testTag("activity_latest_build"),
+        ) {
+          Column(
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Text(
+              text = strings.latestBuildLabel,
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+            if (latestRun != null) {
+              RunStatusPill(
+                status = latestRun.status,
+                conclusion = latestRun.conclusion,
+                strings = strings,
+              )
+            } else {
+              Text(
+                text = strings.noBuildsYetShort,
+                style = MaterialTheme.typography.titleSmall,
+              )
+            }
+          }
+        }
+
+        Surface(
+          shape = RoundedCornerShape(12.dp),
+          color = MaterialTheme.colorScheme.surfaceContainer,
+          modifier =
+            Modifier.weight(0.85f)
+              .clip(RoundedCornerShape(12.dp))
+              .clickable(onClick = onOpenBuilds)
+              .testTag("activity_open_prs"),
+        ) {
+          Column(
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            Text(
+              text = strings.openPrsLabel,
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+              Icon(
+                imageVector = Icons.AutoMirrored.Rounded.CallSplit,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(16.dp),
+              )
+              Text(
+                text = openPrCount.toString(),
+                style = MaterialTheme.typography.titleMedium,
+              )
+            }
+          }
+        }
+
+        Surface(
+          shape = RoundedCornerShape(12.dp),
+          color = MaterialTheme.colorScheme.surfaceContainer,
+          modifier =
+            Modifier.weight(0.85f)
+              .clip(RoundedCornerShape(12.dp))
+              .clickable(onClick = onOpenDrafts)
+              .testTag("activity_offline_drafts"),
+        ) {
+          Column(
+            modifier = Modifier.padding(10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            Text(
+              text = strings.offlineDraftsLabel,
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+            Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+              Icon(
+                imageVector = Icons.Rounded.EditNote,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.secondary,
+                modifier = Modifier.size(18.dp),
+              )
+              Text(
+                text = draftCount.toString(),
+                style = MaterialTheme.typography.titleMedium,
+              )
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun SavedDraftCard(
+  draft: EditorDraftEntity,
+  strings: AppStrings,
+  onResume: () -> Unit,
+  onDelete: () -> Unit,
+) {
+  val fileName = draft.filePath.substringAfterLast('/')
+  Card(
+    shape = RoundedCornerShape(18.dp),
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    modifier =
+      Modifier.fillMaxWidth()
+        .clip(RoundedCornerShape(18.dp))
+        .clickable(onClick = onResume)
+        .testTag("saved_draft_card_$fileName"),
+  ) {
+    Column(
+      modifier = Modifier.fillMaxWidth().padding(14.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        Surface(
+          shape = RoundedCornerShape(10.dp),
+          color = MaterialTheme.colorScheme.primaryContainer,
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.EditNote,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(8.dp).size(20.dp),
+          )
+        }
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+          Text(
+            text = fileName,
+            style = MaterialTheme.typography.titleSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+          Text(
+            text = "${draft.repoFullName} · ${draft.baseBranch} · L${draft.targetLineNumber}",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+        IconButton(
+          onClick = onDelete,
+          modifier = Modifier.minimumInteractiveComponentSize().testTag("delete_draft_$fileName"),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.DeleteOutline,
+            contentDescription = strings.draftDeleted,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+      }
+
+      if (draft.errorText.isNotBlank()) {
+        Text(
+          text = draft.errorText,
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 2,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Box(modifier = Modifier.weight(1f)) {
+          MonoBadge(text = draft.filePath)
+        }
+        FilledTonalButton(
+          onClick = onResume,
+          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+          modifier = Modifier.minimumInteractiveComponentSize().testTag("resume_draft_$fileName"),
+        ) {
+          Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+          Spacer(Modifier.width(4.dp))
+          Text(strings.resumeDraft, style = MaterialTheme.typography.labelLarge)
+        }
+      }
     }
   }
 }

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.BookmarkedRepoEntity
+import com.example.data.local.EditorDraftEntity
 import com.example.data.network.GitHubRepoDto
 import com.example.data.network.GitHubUserDto
 import com.example.data.network.RateLimitCoreDto
@@ -71,6 +72,13 @@ class MainViewModel(private val repo: GitHubRepository) : ViewModel() {
 
   val bookmarkedRepos: StateFlow<List<BookmarkedRepoEntity>> =
     repo.bookmarkedReposFlow.stateIn(
+      scope = viewModelScope,
+      started = SharingStarted.WhileSubscribed(5_000),
+      initialValue = emptyList(),
+    )
+
+  val savedDrafts: StateFlow<List<EditorDraftEntity>> =
+    repo.editorDraftsFlow.stateIn(
       scope = viewModelScope,
       started = SharingStarted.WhileSubscribed(5_000),
       initialValue = emptyList(),
@@ -186,6 +194,13 @@ class MainViewModel(private val repo: GitHubRepository) : ViewModel() {
     viewModelScope.launch {
       repo.removeBookmark(fullName)
       _events.emit(removedMsg)
+    }
+  }
+
+  fun deleteDraft(draftKey: String, deletedMsg: String) {
+    viewModelScope.launch {
+      repo.deleteDraft(draftKey)
+      _events.emit(deletedMsg)
     }
   }
 

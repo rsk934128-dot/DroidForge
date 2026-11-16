@@ -6,13 +6,18 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(
-  entities = [BookmarkedRepoEntity::class, CachedWorkflowRunEntity::class],
-  version = 1,
+  entities = [
+    BookmarkedRepoEntity::class,
+    CachedWorkflowRunEntity::class,
+    EditorDraftEntity::class,
+  ],
+  version = 2,
   exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
   abstract fun bookmarkedRepoDao(): BookmarkedRepoDao
   abstract fun cachedWorkflowRunDao(): CachedWorkflowRunDao
+  abstract fun editorDraftDao(): EditorDraftDao
 
   companion object {
     @Volatile private var instance: AppDatabase? = null

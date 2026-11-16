@@ -1,6 +1,7 @@
 package com.example
 
 import android.app.Application
+import com.example.data.ai.AIErrorService
 import com.example.data.local.AppDatabase
 import com.example.data.prefs.UserPreferencesRepository
 import com.example.data.repository.GitHubRepository
@@ -15,6 +16,7 @@ class AppContainer(application: Application) {
       db = database,
     )
   }
+  val aiErrorService by lazy { AIErrorService() }
 }
 
 class DroidForgeApplication : Application() {

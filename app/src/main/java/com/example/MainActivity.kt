@@ -10,7 +10,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.data.ai.configureAppCheck
 import com.example.ui.DroidForgeApp
+import com.example.ui.viewmodel.EditorViewModel
 import com.example.ui.viewmodel.MainViewModel
 import com.example.ui.viewmodel.PipelineViewModel
 
@@ -19,6 +21,7 @@ class MainActivity : ComponentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    configureAppCheck(this, intent)
     enableEdgeToEdge()
     captureOAuthIntent(intent)
     val container = (application as DroidForgeApplication).container
@@ -26,7 +29,13 @@ class MainActivity : ComponentActivity() {
       val mainViewModel: MainViewModel =
         viewModel(factory = MainViewModel.Factory(container.gitHubRepository))
       val pipelineViewModel: PipelineViewModel =
-        viewModel(factory = PipelineViewModel.Factory(container.gitHubRepository))
+        viewModel(
+          factory = PipelineViewModel.Factory(container.gitHubRepository, container.aiErrorService)
+        )
+      val editorViewModel: EditorViewModel =
+        viewModel(
+          factory = EditorViewModel.Factory(container.gitHubRepository, container.aiErrorService)
+        )
 
       val callbackUri by pendingOAuthCallback
       LaunchedEffect(callbackUri) {
@@ -39,6 +48,7 @@ class MainActivity : ComponentActivity() {
       DroidForgeApp(
         mainViewModel = mainViewModel,
         pipelineViewModel = pipelineViewModel,
+        editorViewModel = editorViewModel,
       )
     }
   }

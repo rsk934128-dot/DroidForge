@@ -8,20 +8,28 @@ import com.example.data.auth.GitHubOAuthTokenResponse
 import com.example.data.local.AppDatabase
 import com.example.data.local.BookmarkedRepoEntity
 import com.example.data.local.CachedWorkflowRunEntity
+import com.example.data.local.EditorDraftEntity
 import com.example.data.network.GitHubApiService
 import com.example.data.network.GitHubArtifactDto
 import com.example.data.network.GitHubBranchDto
+import com.example.data.network.GitHubCreatePrRequest
+import com.example.data.network.GitHubCreateRefRequest
 import com.example.data.network.GitHubJobDto
+import com.example.data.network.GitHubPullRequestResponse
 import com.example.data.network.GitHubPutFileRequest
 import com.example.data.network.GitHubReleaseDto
 import com.example.data.network.GitHubRepoDto
+import com.example.data.network.GitHubRepoFile
 import com.example.data.network.GitHubUserDto
 import com.example.data.network.GitHubWorkflowDto
 import com.example.data.network.GitHubWorkflowRunDto
+import com.example.data.network.PullRequestOutcome
 import com.example.data.network.RateLimitCoreDto
 import com.example.data.network.WorkflowDispatchRequest
 import com.example.data.prefs.UserPreferencesRepository
 import com.example.data.prefs.UserPrefs
+import com.example.domain.JobLogParser
+import com.example.domain.JobLogReport
 import com.squareup.moshi.Moshi
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -114,9 +122,30 @@ class GitHubRepository(
 
   val prefsFlow: Flow<UserPrefs> = prefsRepo.prefsFlow
   val bookmarkedReposFlow: Flow<List<BookmarkedRepoEntity>> = db.bookmarkedRepoDao().observeAll()
+  val editorDraftsFlow: Flow<List<EditorDraftEntity>> = db.editorDraftDao().observeAllDrafts()
 
   fun observeCachedRuns(repoFullName: String): Flow<List<CachedWorkflowRunEntity>> =
     db.cachedWorkflowRunDao().observeRunsForRepo(repoFullName)
+
+  suspend fun getDraft(draftKey: String): EditorDraftEntity? =
+    db.editorDraftDao().getDraft(draftKey)
+
+  suspend fun saveDraft(draft: EditorDraftEntity) {
+    db.editorDraftDao().upsert(draft)
+  }
+
+  suspend fun deleteDraft(draftKey: String) {
+    db.editorDraftDao().deleteDraft(draftKey)
+  }
+
+  companion object {
+    fun draftKeyFor(repoFullName: String, baseBranch: String, filePath: String): String {
+      val normalizedRepo = repoFullName.trim()
+      val normalizedBranch = baseBranch.trim().ifBlank { "main" }
+      val normalizedPath = filePath.trimStart('/')
+      return "$normalizedRepo::$normalizedBranch::$normalizedPath"
+    }
+  }
 
   fun parseTarget(rawInput: String): GitHubLookupTarget? {
     val cleaned =
@@ -194,6 +223,12 @@ class GitHubRepository(
 
   suspend fun fetchReleases(owner: String, repo: String): Result<List<GitHubReleaseDto>> =
     safeApiCall { api.getReleases(owner, repo) }
+
+  suspend fun fetchOpenPullRequests(
+    owner: String,
+    repo: String,
+  ): Result<List<GitHubPullRequestResponse>> =
+    safeApiCall { api.getPullRequests(owner = owner, repo = repo, state = "open") }
 
   suspend fun dispatchWorkflow(
     owner: String,
@@ -288,6 +323,157 @@ class GitHubRepository(
     }
   }
 
+  suspend fun fetchFileContent(
+    owner: String,
+    repo: String,
+    filePath: String,
+    branch: String? = null,
+  ): Result<GitHubRepoFile> =
+    withContext(Dispatchers.IO) {
+      try {
+        ensureTokenSynced()
+        val cleanPath = filePath.trimStart('/')
+        val response = api.getFileContent(owner, repo, cleanPath, branch)
+        if (!response.isSuccessful) {
+          return@withContext Result.failure(
+            IOException(mapHttpError(response.code(), response.message()))
+          )
+        }
+        val body = response.body() ?: return@withContext Result.failure(IOException("Empty file response"))
+        val rawBase64 = body.content?.replace("\n", "")?.replace("\r", "").orEmpty()
+        val decoded =
+          if (rawBase64.isNotEmpty()) {
+            String(Base64.decode(rawBase64, Base64.DEFAULT), Charsets.UTF_8)
+          } else {
+            ""
+          }
+        Result.success(
+          GitHubRepoFile(
+            path = body.path.ifBlank { cleanPath },
+            content = decoded,
+            sha = body.sha,
+            branch = branch ?: "main",
+            htmlUrl = body.htmlUrl,
+          )
+        )
+      } catch (e: Exception) {
+        Result.failure(e)
+      }
+    }
+
+  suspend fun pushFixAndCreatePR(
+    owner: String,
+    repo: String,
+    baseBranch: String,
+    newBranchName: String,
+    filePath: String,
+    updatedContent: String,
+    commitMessage: String,
+    prTitle: String,
+    prBody: String,
+  ): Result<PullRequestOutcome> =
+    withContext(Dispatchers.IO) {
+      try {
+        ensureTokenSynced()
+        if (currentToken.isBlank()) {
+          return@withContext Result.failure(
+            IllegalStateException("GitHub OAuth2 sign-in or Personal Access Token is required to create branches and PRs.")
+          )
+        }
+
+        val cleanBase = baseBranch.trim().ifBlank { "main" }
+        val cleanNewBranch = newBranchName.trim().removePrefix("refs/heads/")
+        if (cleanNewBranch.isBlank() || cleanNewBranch == cleanBase) {
+          return@withContext Result.failure(
+            IllegalArgumentException("Please enter a new branch name different from '$cleanBase'.")
+          )
+        }
+
+        val refResponse = api.getBranchRef(owner, repo, cleanBase)
+        if (!refResponse.isSuccessful) {
+          return@withContext Result.failure(
+            IOException("Unable to read base branch '$cleanBase': ${mapHttpError(refResponse.code(), refResponse.message())}")
+          )
+        }
+        val baseSha =
+          refResponse.body()?.obj?.sha?.takeIf { it.isNotBlank() }
+            ?: return@withContext Result.failure(IOException("Base branch SHA missing."))
+
+        val createRefResponse =
+          api.createRef(
+            owner = owner,
+            repo = repo,
+            body = GitHubCreateRefRequest(ref = "refs/heads/$cleanNewBranch", sha = baseSha),
+          )
+        if (!createRefResponse.isSuccessful) {
+          return@withContext Result.failure(
+            IOException("Unable to create branch '$cleanNewBranch': ${mapHttpError(createRefResponse.code(), createRefResponse.message())}")
+          )
+        }
+
+        val cleanPath = filePath.trimStart('/')
+        val existingSha =
+          try {
+            val fileResp = api.getFileContent(owner, repo, cleanPath, cleanNewBranch)
+            if (fileResp.isSuccessful) fileResp.body()?.sha else null
+          } catch (_: Exception) {
+            null
+          }
+
+        val encoded = Base64.encodeToString(updatedContent.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        val putResp =
+          api.putFileContent(
+            owner = owner,
+            repo = repo,
+            path = cleanPath,
+            body =
+              GitHubPutFileRequest(
+                message = commitMessage.trim().ifBlank { "fix: update $cleanPath via DroidForge" },
+                content = encoded,
+                sha = existingSha,
+                branch = cleanNewBranch,
+              ),
+          )
+        if (!putResp.isSuccessful) {
+          return@withContext Result.failure(
+            IOException("Unable to commit fix to '$cleanNewBranch': ${mapHttpError(putResp.code(), putResp.message())}")
+          )
+        }
+
+        val prResp =
+          api.createPullRequest(
+            owner = owner,
+            repo = repo,
+            body =
+              GitHubCreatePrRequest(
+                title = prTitle.trim().ifBlank { "fix: resolve build error in $cleanPath" },
+                head = cleanNewBranch,
+                base = cleanBase,
+                body = prBody.trim(),
+              ),
+          )
+        if (!prResp.isSuccessful) {
+          return@withContext Result.failure(
+            IOException("Branch '$cleanNewBranch' committed, but PR creation failed: ${mapHttpError(prResp.code(), prResp.message())}")
+          )
+        }
+        val prBodyDto =
+          prResp.body()
+            ?: return@withContext Result.failure(IOException("Empty Pull Request response from GitHub."))
+
+        Result.success(
+          PullRequestOutcome(
+            branchName = cleanNewBranch,
+            prNumber = prBodyDto.number,
+            prUrl = prBodyDto.htmlUrl,
+            commitMessage = commitMessage,
+          )
+        )
+      } catch (e: Exception) {
+        Result.failure(e)
+      }
+    }
+
   suspend fun downloadBinaryToUri(url: String, destinationUri: Uri): Result<Long> =
     withContext(Dispatchers.IO) {
       try {
@@ -313,6 +499,46 @@ class GitHubRepository(
             }
           } ?: return@withContext Result.failure(IOException("Unable to open destination file"))
           Result.success(totalBytes)
+        }
+      } catch (e: Exception) {
+        Result.failure(e)
+      }
+    }
+
+  suspend fun fetchJobLogs(
+    owner: String,
+    repo: String,
+    jobId: Long,
+    jobName: String,
+  ): Result<JobLogReport> =
+    withContext(Dispatchers.IO) {
+      try {
+        ensureTokenSynced()
+        val url = "https://api.github.com/repos/$owner/$repo/actions/jobs/$jobId/logs"
+        val request = Request.Builder().url(url).get().build()
+        okHttpClient.newCall(request).execute().use { response ->
+          if (!response.isSuccessful) {
+            return@withContext Result.failure(
+              IOException(mapHttpError(response.code, response.message))
+            )
+          }
+          val body = response.body ?: return@withContext Result.failure(IOException("Empty log body"))
+          val maxBytes = 750_000
+          val bytes =
+            body.byteStream().use { input ->
+              val buffer = ByteArray(8192)
+              val out = java.io.ByteArrayOutputStream()
+              var total = 0
+              while (total < maxBytes) {
+                val read = input.read(buffer, 0, minOf(buffer.size, maxBytes - total))
+                if (read == -1) break
+                out.write(buffer, 0, read)
+                total += read
+              }
+              out.toByteArray()
+            }
+          val text = String(bytes, Charsets.UTF_8)
+          Result.success(JobLogParser.parse(jobId = jobId, jobName = jobName, rawText = text))
         }
       } catch (e: Exception) {
         Result.failure(e)
